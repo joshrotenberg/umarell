@@ -16,9 +16,9 @@ defmodule Umarell.Job.Worker do
      comment the failure) then exit normally.
   5. Commit and push the branch.
   6. `GitHub.create_draft_pr` with `Closes #N` in the body.
-  7. `GitHub.mark_ready`, then `GitHub.enable_auto_merge`.
+  7. `GitHub.mark_ready`, then `GitHub.enable_auto_merge` (if `:auto_merge` is true).
   8. Comment the result envelope (status, summary, cost_usd, turns, test outcome).
-  9. Exit. `agent:working` is NOT cleared; the issue closes on auto-merge.
+  9. Exit. `agent:working` is NOT cleared; the issue closes on auto-merge (or manual merge).
 
   ## Start options
 
@@ -36,6 +36,9 @@ defmodule Umarell.Job.Worker do
     commit/push steps. Defaults to a `System.cmd`-based implementation.
   - `:github_opts` -- keyword list forwarded as opts to every
     `Umarell.GitHub.*` call (supports `:cmd_fn` injection for tests).
+  - `:auto_merge` -- boolean (default `Config.auto_merge?()`). When true, calls
+    `GitHub.enable_auto_merge` after marking ready. When false, skips that call
+    and notes in the result envelope that the PR is left at ready for a human to merge.
 
   ## Entry points
 
@@ -101,7 +104,8 @@ defmodule Umarell.Job.Worker do
       claude_fn: Keyword.get(opts, :claude_fn, &default_claude_fn/3),
       test_fn: Keyword.get(opts, :test_fn, &default_test_fn/2),
       git_fn: Keyword.get(opts, :git_fn, &default_git_fn/3),
-      github_opts: Keyword.get(opts, :github_opts, [])
+      github_opts: Keyword.get(opts, :github_opts, []),
+      auto_merge: Keyword.get(opts, :auto_merge, Config.auto_merge?())
     }
 
     {:ok, state, {:continue, :run}}
@@ -129,30 +133,48 @@ defmodule Umarell.Job.Worker do
       claude_fn: claude_fn,
       test_fn: test_fn,
       git_fn: git_fn,
-      github_opts: github_opts
+      github_opts: github_opts,
+      auto_merge: auto_merge
     } = state
 
     with {:ok, checkout_path} <- workspace_fn.(event.repo, event.number, git_fn: git_fn),
          prompt = compose_prompt(event),
          {:ok, claude_result} <- claude_fn.(prompt, checkout_path, []),
          test_result = test_fn.(checkout_path, []),
-         :ok <- handle_gate(test_result, event, checkout_path, claude_result, git_fn, github_opts) do
+         :ok <-
+           handle_gate(
+             test_result,
+             event,
+             checkout_path,
+             claude_result,
+             git_fn,
+             github_opts,
+             auto_merge
+           ) do
       :ok
     end
   end
 
   # Handles the local gate result. On success, proceeds with commit/push/PR.
   # On failure, parks the issue and returns :ok (worker exits normally).
-  defp handle_gate({:ok, test_output}, event, checkout_path, claude_result, git_fn, github_opts) do
+  defp handle_gate(
+         {:ok, test_output},
+         event,
+         checkout_path,
+         claude_result,
+         git_fn,
+         github_opts,
+         auto_merge
+       ) do
     with {:ok, pr_url} <- commit_push_pr(event, checkout_path, git_fn, github_opts),
          pr_number = extract_pr_number(pr_url),
          {:ok, _} <- GitHub.mark_ready(event.repo, pr_number, github_opts),
-         {:ok, _} <- GitHub.enable_auto_merge(event.repo, pr_number, github_opts),
+         {:ok, _} <- maybe_enable_auto_merge(auto_merge, event.repo, pr_number, github_opts),
          {:ok, _} <-
            GitHub.comment(
              event.repo,
              event.number,
-             result_envelope(claude_result, test_output),
+             result_envelope(claude_result, test_output, auto_merge),
              github_opts
            ) do
       :ok
@@ -165,7 +187,8 @@ defmodule Umarell.Job.Worker do
          _checkout_path,
          _claude_result,
          _git_fn,
-         github_opts
+         github_opts,
+         _auto_merge
        ) do
     labels = Config.labels()
 
@@ -186,6 +209,14 @@ defmodule Umarell.Job.Worker do
            ) do
       :ok
     end
+  end
+
+  defp maybe_enable_auto_merge(true, repo, pr_number, github_opts) do
+    GitHub.enable_auto_merge(repo, pr_number, github_opts)
+  end
+
+  defp maybe_enable_auto_merge(false, _repo, _pr_number, _github_opts) do
+    {:ok, :skipped}
   end
 
   defp commit_push_pr(event, checkout_path, git_fn, github_opts) do
@@ -241,7 +272,7 @@ defmodule Umarell.Job.Worker do
     """
   end
 
-  defp result_envelope(claude_result, test_output) do
+  defp result_envelope(claude_result, test_output, auto_merge) do
     status = Map.get(claude_result, :status, "unknown")
     summary = Map.get(claude_result, :summary, "")
     cost_usd = Map.get(claude_result, :cost_usd)
@@ -249,6 +280,13 @@ defmodule Umarell.Job.Worker do
 
     cost_str = if cost_usd, do: "$#{:erlang.float_to_binary(cost_usd, decimals: 4)}", else: "N/A"
     turns_str = if turns, do: "#{turns}", else: "N/A"
+
+    merge_note =
+      if auto_merge do
+        ""
+      else
+        "\n### Merge\n\nPR left at ready for a human to merge.\n"
+      end
 
     """
     ## Result Envelope
@@ -266,6 +304,7 @@ defmodule Umarell.Job.Worker do
     ```
     #{String.trim(test_output)}
     ```
+    #{merge_note}
     """
   end
 
