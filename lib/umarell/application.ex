@@ -1,19 +1,22 @@
 defmodule Umarell.Application do
-  # See https://hexdocs.pm/elixir/Application.html
-  # for more information on OTP Applications
   @moduledoc false
 
   use Application
 
   @impl true
   def start(_type, _args) do
-    children = [
-      # Starts a worker by calling: Umarell.Worker.start_link(arg)
-      # {Umarell.Worker, arg}
+    base_children = [
+      Umarell.JobSupervisor,
+      Umarell.Scheduler
     ]
 
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
+    children =
+      if Application.get_env(:umarell, :start_poller, true) do
+        base_children ++ [Umarell.Intake.Poller]
+      else
+        base_children
+      end
+
     opts = [strategy: :one_for_one, name: Umarell.Supervisor]
     Supervisor.start_link(children, opts)
   end

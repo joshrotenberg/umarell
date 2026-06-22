@@ -1,18 +1,5 @@
 defmodule Umarell do
   @moduledoc """
-  Documentation for `Umarell`.
+  Umarell is an autonomous GitHub issue worker.
   """
-
-  @doc """
-  Hello world.
-
-  ## Examples
-
-      iex> Umarell.hello()
-      :world
-
-  """
-  def hello do
-    :world
-  end
 end
