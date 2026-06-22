@@ -113,4 +113,24 @@ defmodule Umarell.Config do
         val
     end
   end
+
+  @doc """
+  Returns whether the worker should enable auto-merge after marking the PR ready.
+
+  Default: `true`. Override via the `UMARELL_AUTO_MERGE` environment variable
+  (`"false"` or `"0"` -> false) or application config key `:auto_merge`.
+  """
+  @spec auto_merge?() :: boolean()
+  def auto_merge? do
+    case Application.get_env(@app, :auto_merge) do
+      nil ->
+        case System.get_env("UMARELL_AUTO_MERGE") do
+          val when val in ["false", "0"] -> false
+          _ -> true
+        end
+
+      val ->
+        val
+    end
+  end
 end

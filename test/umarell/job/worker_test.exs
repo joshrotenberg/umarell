@@ -347,6 +347,86 @@ defmodule Umarell.Job.WorkerTest do
     end
   end
 
+  describe "auto_merge option" do
+    test "auto_merge true: enable_auto_merge is called" do
+      notify_pid = self()
+
+      gh_fn =
+        multi_gh_cmd_fn(notify_pid, [
+          # create_draft_pr
+          {"https://github.com/owner/repo/pull/99\n", 0},
+          # mark_ready
+          {"", 0},
+          # enable_auto_merge
+          {"", 0},
+          # comment
+          {"", 0}
+        ])
+
+      opts = [
+        workspace_fn: ok_workspace_fn(notify_pid),
+        claude_fn: ok_claude_fn(notify_pid),
+        test_fn: ok_test_fn(notify_pid),
+        git_fn: ok_git_fn(notify_pid),
+        github_opts: [cmd_fn: gh_fn],
+        auto_merge: true
+      ]
+
+      assert :ok = Worker.run(@test_event, opts)
+
+      # create_draft_pr
+      assert_received {:gh_call, _pr_args}
+      # mark_ready
+      assert_received {:gh_call, ready_args}
+      assert "ready" in ready_args
+      # enable_auto_merge
+      assert_received {:gh_call, merge_args}
+      assert "--auto" in merge_args
+      # comment
+      assert_received {:gh_call, _comment_args}
+    end
+
+    test "auto_merge false: enable_auto_merge NOT called, PR marked ready, envelope notes human merge" do
+      notify_pid = self()
+
+      gh_fn =
+        multi_gh_cmd_fn(notify_pid, [
+          # create_draft_pr
+          {"https://github.com/owner/repo/pull/99\n", 0},
+          # mark_ready
+          {"", 0},
+          # comment (no enable_auto_merge call)
+          {"", 0}
+        ])
+
+      opts = [
+        workspace_fn: ok_workspace_fn(notify_pid),
+        claude_fn: ok_claude_fn(notify_pid),
+        test_fn: ok_test_fn(notify_pid),
+        git_fn: ok_git_fn(notify_pid),
+        github_opts: [cmd_fn: gh_fn],
+        auto_merge: false
+      ]
+
+      assert :ok = Worker.run(@test_event, opts)
+
+      # create_draft_pr
+      assert_received {:gh_call, _pr_args}
+      # mark_ready
+      assert_received {:gh_call, ready_args}
+      assert "ready" in ready_args
+      # comment
+      assert_received {:gh_call, comment_args}
+      body_index = Enum.find_index(comment_args, &(&1 == "--body"))
+      comment_body = Enum.at(comment_args, body_index + 1)
+      assert comment_body =~ "human to merge"
+
+      # No further gh calls (enable_auto_merge was not called)
+      remaining = collect_gh_calls()
+      refute Enum.any?(remaining, fn args -> "--auto" in args end)
+    end
+  end
+
   # Collects all {:gh_call, args} messages from the mailbox (non-blocking).
   defp collect_gh_calls do
     Stream.repeatedly(fn ->
